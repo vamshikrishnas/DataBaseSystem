@@ -7,6 +7,7 @@ import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Scanner;
@@ -26,6 +27,40 @@ public class DBSystem {
 	
 	// <table_name, vector of pages >
 	private static HashMap<String,Vector<TablePageOffset>> dbInfo = new HashMap<String,Vector<TablePageOffset>>();
+	
+	// Data Structures for Handling LRU
+	public static HashMap<String, HashMap<Integer,TablePageOffset> > localPageTable;
+	public static LinkedHashMap<Integer,HashMap<Integer,String>> page;
+	public static HashMap<Integer,String> globalPageTable;
+	
+	public void initLRU()
+	{
+		globalPageTable=new HashMap<Integer,String>(numPages);
+        page=new LinkedHashMap<Integer, HashMap<Integer, String>>(numPages,0.75f,true);
+
+        int i;
+        for(i=0;i<numPages;i++)
+        {
+            globalPageTable.put(i,null);
+            page.put(i,null);
+        }
+
+
+        localPageTable=new HashMap<String, HashMap<Integer, TablePageOffset>>();
+        try
+        {
+            for(i=0;i<tableNames.size();i++)
+            {
+                System.out.println(tableNames.get(i));
+            	localPageTable.put(tableNames.get(i),null);
+            }
+        }
+        catch(Exception e)
+        {
+
+            e.printStackTrace();
+        }
+     }
 	
 	
 	/* 
@@ -278,6 +313,432 @@ public class DBSystem {
 	 * 
 	 */
 	
+	
+
+	public String getRecord(String tableName, int recordId)
+	{
+		
+		  String tableNameFile=pathTables.concat(tableName);
+          tableNameFile=tableNameFile.concat(".csv");
+          int i,pageIndex;
+          String line="",replaceTableName="";
+          int startOffset=0,endOffset=0,availablePage,startLine=0,endLine=0;
+          
+          
+          
+          // search if that record ID is already available in page
+          String found=searchRecordID(tableName,recordId);
+          if(found!=null)
+          {
+             System.out.println("HIT");
+             return found;
+          }
+          
+          /*check if any free page available in global page table*/
+          availablePage=freePageAvailable();
+          // if free page not available then go for page replacement*/
+          if(availablePage==-1)
+          {
+        	  availablePage=replacePageAlgo();
+        	  /* get table name from which the old entry is to be invalidated */
+              replaceTableName=globalPageTable.get(availablePage);
+              /* remove old page entry*/
+              localPageTable.get(replaceTableName).remove(availablePage);
+             //System.out.println("replaced table name="+replaceTableName+" replaced page="+availablePage);
+           }
+          
+          System.out.println("MISS "+availablePage);
+          Vector <TablePageOffset> table=dbInfo.get(tableName);
+          /* get start record ,end record and offset from dbInfo for reading the only that page from file*/
+          for(i=0;i<table.size();i++)
+          {
+            if(table.get(i).startRecord <= recordId && table.get(i).endRecord>=recordId)
+            {
+                startOffset=table.get(i).offSet;
+                startLine=table.get(i).startRecord;
+                endLine=table.get(i).endRecord;
+
+                if(i<table.size()-1)
+                endOffset=table.get(i+1).offSet;
+
+                break;
+            }
+
+         }
+         pageIndex=i;
+         try
+         {
+        	 HashMap<Integer,String> buffer=new HashMap<Integer, String>();
+
+        	 /* open table file to read page */
+        	 RandomAccessFile randomAccessFile=new RandomAccessFile(tableNameFile,"r");
+
+        	 /* goto first record of that page using offset*/
+        	 randomAccessFile.seek((long)startOffset);
+
+
+        	 /*read next n records*/
+        	 for(i=0;i< (endLine-startLine+1);i++)
+        	 {
+        		 line=randomAccessFile.readLine();
+        		 if(line==null)
+        			 break;
+        		 if(startLine+i==recordId)
+        			 found=line;
+        		 buffer.put(startLine+i,line);
+
+        	 }
+        	 page.put(availablePage,buffer);
+
+        	 /* Add newly aquired page number to localpagetable of that table*/
+
+        	 HashMap<Integer,TablePageOffset> vector=localPageTable.get(tableName);
+        	 if(vector==null)
+        		 vector=new HashMap<Integer, TablePageOffset>();
+
+
+        	 /* for available pag number store its starting recordID endRecordID and offset*/
+        	 vector.put(availablePage,table.get(pageIndex));
+        	 localPageTable.put(tableName,vector);
+
+
+        	 /*put newly loaded page and its related table name in global page table*/
+        	 globalPageTable.put(availablePage,tableName);
+
+            randomAccessFile.close();
+
+         }
+         catch (Exception e)
+         {
+        	 e.printStackTrace();
+         //System.out.println("Error opening table file"+e);
+         }
+         return found;
+}
+	
+	
+	/* Description:
+	 * 
+	 *  Get the last page for the corresponding Table in main memory, if not already present.
+	 *  If the page has enough free space, 
+	 *  then append the record to the page else, 
+	 *  get new free page and add record to the new page.Do not flush modified page immediately.
+	 *  
+	 */
+	
+	public void insertRecord(String tableName, String record)
+	{
+	
+		String table_Fname=pathTables+tableName+".csv";
+		Vector <TablePageOffset> currentTable=dbInfo.get(tableName);
+		
+		int lastPageNo=currentTable.size()-1;
+        HashMap <Integer,String> thisPage;
+        
+        long freeSpaceInLastPage;
+        long fileLength=0;
+        String replaceTableName="";
+        RandomAccessFile randomAccessFile;
+
+        TablePageOffset lastPageOffset=currentTable.get(lastPageNo);
+        try
+        {
+            randomAccessFile=new RandomAccessFile(table_Fname,"r");
+            fileLength=randomAccessFile.length();
+            randomAccessFile.close();
+        }
+        catch(Exception e)
+        {
+        	System.out.println("Error while opening file in insertRecord "+e);
+        	e.printStackTrace();
+        }
+        
+        freeSpaceInLastPage=pageSize-(fileLength-lastPageOffset.offSet);
+        
+        
+        if(freeSpaceInLastPage>=(record.length()+1) || freeSpaceInLastPage==(record.length()) )
+        {
+        	 int k;
+             boolean pageFound=false;
+
+             if(localPageTable.containsKey(tableName))
+            	 System.out.println("Found it");
+             Object [] pageKey=localPageTable.get(tableName).keySet().toArray();
+
+
+             /* check whether that page is available in memory */
+             for(k=0;k<localPageTable.get(tableName).size();k++)
+             {
+                 if(localPageTable.get(tableName).get(pageKey[k]).offSet==lastPageOffset.offSet)
+                 {
+                     pageFound=true;
+                     lastPageNo=Integer.parseInt(pageKey[k].toString());
+                     break;
+                 }
+             }
+             if(pageFound)
+             {
+            	 thisPage=page.get(lastPageNo);
+                 thisPage.put(lastPageOffset.endRecord+1,record);
+                 page.put(lastPageNo,thisPage);
+                 localPageTable.get(tableName).put(lastPageNo,lastPageOffset);
+             }
+             else
+             {
+            	 int availablePage=freePageAvailable();
+            	 /* no free frame available to fetch required page into memory*/
+                 if(availablePage==-1)
+                 {
+                	 	availablePage=replacePageAlgo();
+                	 	/* get table name from which the old entry is to be invalidated */
+                	 	replaceTableName=globalPageTable.get(availablePage);
+                	 	localPageTable.get(replaceTableName).remove(availablePage);
+                 }
+                 HashMap<Integer,String> buffer=new HashMap<Integer, String>();
+                 try
+                 {
+                    /* open table file to read page */
+                    randomAccessFile=new RandomAccessFile(table_Fname,"r");
+
+                     /* goto first record of that page using offset*/
+                    randomAccessFile.seek(lastPageOffset.offSet);
+
+                    String line="";
+                    int i;
+
+                     /*read next n records*/
+                    for(i=0;;i++)
+                    {
+                        line=randomAccessFile.readLine();
+
+                        if(line==null)
+                            break;
+
+                        buffer.put(lastPageOffset.startRecord+i,line);
+                    }
+                    buffer.put(lastPageOffset.startRecord+i,record);
+
+                    page.put(availablePage, buffer);
+
+                    randomAccessFile.close();
+                    lastPageOffset.endRecord++;
+
+                    /* make entry in global page table*/
+                    globalPageTable.put(availablePage,tableName);
+                    localPageTable.get(tableName).put(availablePage,lastPageOffset);
+                }
+
+                 catch (Exception e)
+                 {
+                	 e.printStackTrace();
+                  //   System.out.println("Error="+e);
+                 }
+             }
+             /* update dbInfo metadata i.e add 1 to endRecord Field*/
+
+             dbInfo.get(tableName).get(dbInfo.get(tableName).size()-1).endRecord++;
+
+
+             /*write newly inserted record into Table file*/
+
+              try
+              {
+                 // record=record.replaceAll(" ",",");
+                  randomAccessFile=new RandomAccessFile(table_Fname,"rw");
+                  randomAccessFile.seek(randomAccessFile.length());
+                  randomAccessFile.writeUTF(record+"\n");
+                  randomAccessFile.close();
+             }
+             catch (Exception e)
+             {
+                 e.printStackTrace();
+             }
+             
+        }else
+        {
+        	int tempOffset,availablePage;
+            int tempStart,tempEnd;
+
+
+              try
+              {
+                  randomAccessFile=new RandomAccessFile(table_Fname,"r");
+                  fileLength=randomAccessFile.length();
+                  randomAccessFile.close();
+
+              }
+              catch(Exception e)
+              {
+              	e.printStackTrace();
+                 // System.out.println("Error while opening file in insertRecord "+e);
+              }
+
+              tempOffset=(int)fileLength+1;
+              tempStart=lastPageOffset.endRecord+1;
+              tempEnd=tempStart;
+
+              TablePageOffset tempObj=new TablePageOffset();
+              tempObj.offSet=tempOffset;
+              tempObj.startRecord=tempStart;
+              tempObj.endRecord=tempEnd;
+
+              dbInfo.get(tableName).add(tempObj);
+
+              availablePage=freePageAvailable();
+
+              if(availablePage==-1)
+              {
+                 // System.out.println("free page not found. going for replacement");
+
+                  availablePage=replacePageAlgo();
+
+                  /* get table name from which the old entry is to be invalidated */
+                  replaceTableName=globalPageTable.get(availablePage);
+
+
+                  /* remove old page entry*/
+
+                  localPageTable.get(replaceTableName).remove(availablePage);
+              //    System.out.println("replaced table name="+replaceTableName+" replaced page="+availablePage);
+
+
+              }
+
+
+              HashMap<Integer,String> buffer=new HashMap<Integer, String>();
+
+              buffer.put(tempEnd,record);
+
+              page.put(availablePage, buffer);
+
+                  /* make entry in global page table and local page table*/
+              globalPageTable.put(availablePage,tableName);
+              localPageTable.get(tableName).put(availablePage,tempObj);
+
+              try
+              {
+                //  record=record.replaceAll(" ",",");
+                  randomAccessFile=new RandomAccessFile(table_Fname,"rw");
+                  randomAccessFile.seek(randomAccessFile.length());
+                  randomAccessFile.writeUTF(record+"\n");
+                  randomAccessFile.close();
+              }
+              catch (Exception e)
+              {
+                  e.printStackTrace();
+              }
+
+
+          }
+             
+        	
+        
+        
+	}
+	
+	/* Description:
+	 * 
+	 * Since primary and secondary memory are independent, no need to
+	 * flush modified pages immediately, instead this function will be called
+	 * to write modified pages to disk.
+	 * Write modified pages in memory to disk.
+	 * 
+	 */
+	
+	
+
+
+	public void flushPages()
+	{
+		
+	
+	}
+	
+	
+	private int freePageAvailable() {
+		// TODO Auto-generated method stub
+		
+		for(int i=0;i<numPages;i++)
+        {
+            if(globalPageTable.get(i)==null)
+                return i;
+        }
+        return -1;
+	}
+	
+	
+	
+	private int replacePageAlgo()
+    {
+
+        Iterator<Map.Entry<Integer,HashMap<Integer,String>>> it= page.entrySet().iterator();
+        Map.Entry<Integer,HashMap<Integer,String>> last=null;
+            last=it.next();
+        return last.getKey();
+
+    }
+	/*
+	 * 
+	 * Tester Funtion 
+	 */
+	
+	public void tester()
+	{
+		System.out.println("Page Size: "+pageSize);
+		System.out.println("Num Pages: "+numPages);
+		System.out.println("Num Tables: "+tableCount);
+		System.out.println("File Data Path: "+pathTables);
+		System.out.println("Printing Table Names");
+		
+		Iterator it = tableNames.iterator();
+		while(it.hasNext())
+		{
+			System.out.println("Table Name: "+it.next().toString());
+		}
+	}
+	
+	
+	public String searchRecordID(String tableName,int recordID)
+    {
+        String result=null;
+        int i,pageIndex;
+
+        /* get local page table for current table */
+        HashMap<Integer,TablePageOffset> localPages=localPageTable.get(tableName);
+
+        if(localPages==null)
+            return null;
+
+        /* store all its page numbers already present*/
+        Object [] pageNos=localPages.keySet().toArray();
+
+        /* for each pagenumber check if required recordID lies in that page*/
+        for(i=0;i<pageNos.length;i++)
+        {
+            if(localPages.get(pageNos[i]).startRecord <= recordID && recordID <= localPages.get(pageNos[i]).endRecord)
+            {
+
+                /* if required recordID present in current page then put that page again to increase its access order in linkedHashMap*/
+                page.put(Integer.parseInt(pageNos[i].toString()),page.get(Integer.parseInt(pageNos[i].toString())));
+
+                      break;
+            }
+        }
+          if(i==pageNos.length)
+          {
+                return null;
+          }
+
+        HashMap <Integer,String> recordLine=null;
+        recordLine=page.get(pageNos[i]);
+
+        result=recordLine.get(recordID);
+
+        return result;
+    }
+	
+	
+	
 	private void printDBinfo() {
 		// TODO Auto-generated method stub
 		
@@ -312,115 +773,6 @@ public class DBSystem {
 		
 		
 	}
-
-	
-	
-	
-	
-	public String getRecord(String tableName, int recordId)
-	{
-		String record = null;
-		String tableFname=pathTables+tableName+".csv".toString();
-		try
-		{
-			
-			
-			Vector<TablePageOffset> t_pages=dbInfo.get(tableName);
-			if(t_pages==null)
-				 	return null;
-			 
-			 int sOfset = 0,sLine = 0,eLine = 0,eOfset;
-			// System.out.println(t_pages.size());
-			 for(int i=0;i<t_pages.size();i++)
-	          {
-	               if(t_pages.get(i).startRecord <= recordId && t_pages.get(i).endRecord>=recordId)
-	               {
-	            	   sOfset=t_pages.get(i).offSet;
-	                   sLine=t_pages.get(i).startRecord;
-	                   eLine=t_pages.get(i).endRecord;
-
-	                   if(i<t_pages.size()-1)
-	                	   eOfset=t_pages.get(i+1).offSet;
-	                   break;
-	               }
-	          }
-			 
-			 RandomAccessFile rf=new RandomAccessFile(tableFname, "r");
-			 rf.seek((long)sOfset);
-			 
-			 for(int i=0;i<(eLine-sLine+1);i++)
-	         {
-	                record=rf.readLine();
-
-	                if(record==null)
-	                    break;
-
-	                if(sLine+i==recordId)
-	                    return record;
-	         }
-			 
-	}catch(Exception e)
-		{
-			e.printStackTrace();
-		}
-		
-		return record;
-		
-		
-		
-	}
-	
-	
-	/* Description:
-	 * 
-	 *  Get the last page for the corresponding Table in main memory, if not already present.
-	 *  If the page has enough free space, 
-	 *  then append the record to the page else, 
-	 *  get new free page and add record to the new page.Do not flush modified page immediately.
-	 *  
-	 */
-	
-	public void insertRecord(String tableName, String record)
-	{
-		
-	
-	}
-	
-	/* Description:
-	 * 
-	 * Since primary and secondary memory are independent, no need to
-	 * flush modified pages immediately, instead this function will be called
-	 * to write modified pages to disk.
-	 * Write modified pages in memory to disk.
-	 * 
-	 */
-	
-	public void flushPages()
-	{
-	
-	}
-	
-	
-	/*
-	 * 
-	 * Tester Funtion 
-	 */
-	
-	public void tester()
-	{
-		System.out.println("Page Size: "+pageSize);
-		System.out.println("Num Pages: "+numPages);
-		System.out.println("Num Tables: "+tableCount);
-		System.out.println("File Data Path: "+pathTables);
-		System.out.println("Printing Table Names");
-		
-		Iterator it = tableNames.iterator();
-		while(it.hasNext())
-		{
-			System.out.println("Table Name: "+it.next().toString());
-		}
-	}
-	
 	
 	public static void main(String[] args)
 	{
@@ -428,10 +780,13 @@ public class DBSystem {
 		dbs.readConfig("/home/vamshi_s/Downloads/Downloads/test/");
 		dbs.populateDBInfo();
 		
-		/*
+		
 		// Query Student Table
 		
 		System.out.println("\nSearching for Records\n");
+		dbs.initLRU();
+		
+		//
 		
 		System.out.println(dbs.getRecord("student", 19));
 		System.out.println(dbs.getRecord("student", 0));
@@ -446,8 +801,8 @@ public class DBSystem {
 		System.out.println(dbs.getRecord("Orders", 2));
 		System.out.println(dbs.getRecord("Orders", 19));
 		System.out.println(dbs.getRecord("Orders", 14));
-		 */	
-		
+			
+		dbs.insertRecord("student","14,vamshi,mtech");
 	}
 	
 	
