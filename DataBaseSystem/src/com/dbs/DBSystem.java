@@ -1,9 +1,12 @@
 package com.dbs;
 
 import java.awt.List;
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileWriter;
+import java.io.InputStreamReader;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -26,7 +29,11 @@ public class DBSystem {
 	
 	public String pathTables;
 	
+	
+	
 	private static ArrayList<String> tableNames = new ArrayList<String>();
+	
+	private static HashMap<String, Long> fileLengthInfo = new HashMap<String,Long>();
 	
 	// <table_name, vector of pages >
 	private static HashMap<String,Vector<TablePageOffset>> dbInfo = new HashMap<String,Vector<TablePageOffset>>();
@@ -40,11 +47,18 @@ public class DBSystem {
 	public static HashMap<Integer,Vector<Integer>> flushPageInfo;
 	public static Vector<Integer> pagesToFlush = new Vector<Integer>();
 	
+	
+	/*
+	 * 
+	 * Initializes LRU 
+	 */
+	
 	public void initLRU()
 	{
 		globalPageTable=new HashMap<Integer,String>(numPages);
         page=new LinkedHashMap<Integer, HashMap<Integer, String>>(numPages,0.75f,true);
         flushPageInfo=new HashMap<Integer,Vector<Integer>>();
+       
         int i;
         for(i=0;i<numPages;i++)
         {
@@ -186,6 +200,7 @@ public class DBSystem {
 	 * not be greater than page size. 
 	*/
 	
+	
 	public void populateDBInfo()
 	{
 		
@@ -212,8 +227,14 @@ public class DBSystem {
 			{
 				table_name=it.next();
 				table_Fname=pathTables+table_name+".csv";
+				
 				Scanner tableReader = new Scanner(new File(table_Fname));
 				tableReader.useDelimiter("\n");
+				
+				// just to get the length of file
+				RandomAccessFile rf= new RandomAccessFile(new File(table_Fname),"r");
+				fileLengthInfo.put(table_name,rf.length());
+				rf.close();
 				
 				currentOffset = 0;
 				currentRecord = 0;
@@ -309,6 +330,8 @@ public class DBSystem {
 		printDBinfo();
 		
 	}
+	
+	
 	
 	
 	/* Description:
@@ -449,6 +472,8 @@ public class DBSystem {
         RandomAccessFile randomAccessFile;
 
         TablePageOffset lastPageOffset=currentTable.get(lastPageNo);
+       
+        /*
         try
         {
             randomAccessFile=new RandomAccessFile(table_Fname,"r");
@@ -468,12 +493,16 @@ public class DBSystem {
          * 
          */
         
-        freeSpaceInLastPage=pageSize-(fileLength-lastPageOffset.offSet);
+        
+        
+        freeSpaceInLastPage=pageSize-(fileLengthInfo.get(tableName)-lastPageOffset.offSet);
+        
         if(freeSpaceInLastPage>=(record.length()+1) || freeSpaceInLastPage==(record.length()) )
         {
         	 int k;
              boolean pageFound=false;
-             System.out.println("For Record"+record);
+            // System.out.println("For Record"+record);
+             
              if(localPageTable.get(tableName)==null)
              {
             	 int availablePage=freePageAvailable();
@@ -524,6 +553,7 @@ public class DBSystem {
                     globalPageTable.put(availablePage,tableName);
                     vector.put(availablePage,lastPageOffset);
                     localPageTable.put(tableName,vector);
+                    fileLengthInfo.put(tableName,fileLength+record.length()+1 );
             	 }catch(Exception e)
             	 {
             		 e.printStackTrace();
@@ -602,6 +632,7 @@ public class DBSystem {
 	                    /* make entry in global page table*/
 	                    globalPageTable.put(availablePage,tableName);
 	                    localPageTable.get(tableName).put(availablePage,lastPageOffset);
+	                    fileLengthInfo.put(tableName,fileLength+record.length()+1 );
 	                }
 	
 	                 catch (Exception e)
@@ -739,6 +770,11 @@ public class DBSystem {
 	}
 	
 	
+	/*
+	 * This is an helper method, which checks for any available free pages in the LRU.If so returns the page num.
+	 * else returns -1;
+	 * 
+	 */
 	private int freePageAvailable() {
 		// TODO Auto-generated method stub
 		
@@ -750,7 +786,11 @@ public class DBSystem {
         return -1;
 	}
 	
-	
+	/*
+	 * This method is called to replace the page which is least recently used from the LRU and if the page is modified it wil 
+	 * write the contents to the file else just replaces the file.
+	 * 
+	 */
 	
 	private int replacePageAlgo()
     {
@@ -784,7 +824,8 @@ public class DBSystem {
         	{
         			e.printStackTrace();
         	}
-        	pagesToFlush.remove(page_num);
+        	//System.out.println(page_num);
+        	pagesToFlush.removeElement(page_num);
         }
         return last.getKey();
 
@@ -809,6 +850,12 @@ public class DBSystem {
 		}
 	}
 	
+	
+	/*
+	 * this is an helper method used by get record method, this methd searches for the page in LRU, 
+	 * if foung returns the record string else return s null.
+	 * 
+	 */
 	
 	public String searchRecordID(String tableName,int recordID)
     {
@@ -864,12 +911,18 @@ public class DBSystem {
 			while(pg.hasNext())
 			{
 				t = pg.next();
-				System.out.println(t.startRecord + " " + t.endRecord + " " + t.offSet);
+				System.out.println("START REC"+t.startRecord + " "+"END REC"+ t.endRecord + " " + t.offSet);
 			}
 		}
 		
 	}
 
+	
+	/*
+	 * 
+	this method adds the records the pagetable corresponding to the table name.
+	 * 
+	 */
 	private void addRecordtoDB(String table_name, TablePageOffset pageData) {
 		// TODO Auto-generated method stub
 		
@@ -886,40 +939,100 @@ public class DBSystem {
 		
 	}
 	
+	
+	
+	public void printtableFile(String str) 
+	{
+		String tname= pathTables.concat(str+".csv");
+		
+		try
+		{
+			FileInputStream fis = new FileInputStream(new File(tname));
+			BufferedReader br = new BufferedReader(new InputStreamReader(fis));
+		
+			String line = null;
+			int len=0;
+			int offset=100;
+			while ((line = br.readLine()) != null) {
+				
+				System.out.print(len+".");
+				System.out.println(line);
+				System.out.println(line.length()+1);
+				len++;
+			}
+		
+			br.close();
+			fis.close();
+		}catch(Exception e)
+		{
+			e.printStackTrace();
+		}
+	}
 	public static void main(String[] args)
 	{
 		DBSystem dbs=new DBSystem();
-		dbs.readConfig("/home/vamshi_s/Downloads/Downloads/test/");
+		dbs.readConfig("/home/vamshi_s/Downloads/Downloads/testCase/");
 		dbs.populateDBInfo();
 		
+		System.out.println("\n \n ");
 		
+		
+		dbs.printtableFile("countries");
+		
+		
+		System.out.println("\n \n ");
 		// Query Student Table
 		
 		System.out.println("\nSearching for Records\n");
 		dbs.initLRU();
 	
 		
-		dbs.insertRecord("student","12,Vamshi,MTech");
-		dbs.insertRecord("student", "13,Vinay,MTech");	
-		dbs.insertRecord("student", "14,Mani,MTech");
-		dbs.insertRecord("student","15,Vshi,MTech");
-		dbs.insertRecord("student", "16,Viy,MTech");	
 		
-		//
+		dbs.getRecord("countries",0); // miss 0 <page1>
+		dbs.getRecord("countries",1); // hit <page1>
+		dbs.getRecord("countries",2); // hit <page1>
+		dbs.insertRecord("countries", "record"); // miss 1
+		dbs.getRecord("countries",2); //hit <page1>
+		dbs.getRecord("countries",2); //hit <page1>
+		dbs.getRecord("countries",3); // miss 2 <page2>
+		dbs.getRecord("countries",41); // miss 3 <page12>
 		
-		System.out.println(dbs.getRecord("student", 19));
-		System.out.println(dbs.getRecord("student", 0));
-		System.out.println(dbs.getRecord("student", 26));
+		dbs.getRecord("countries",9); //call pagereplace,replace page 1 with  miss1<page3>
+		dbs.getRecord("countries",39); // hit <page12>
 		
-		//Query Customers Table
+		dbs.getRecord("countries",28); //miss 0 <page9>
+		dbs.getRecord("countries",1);  //miss 2 <page1>
 		
-		System.out.println(dbs.getRecord("Customers", 3));
+		dbs.getRecord("countries",30); // hit 0 <page9>
 		
-		//Query Orders Table
+		dbs.getRecord("countries",38); // hit <page12>
+		dbs.getRecord("countries",39); //hit <page12>
+		dbs.getRecord("countries",31); //miss 1 <page10>
+		dbs.insertRecord("countries", "record"); //replace 0, page9
+		dbs.getRecord("countries",42); 
+		dbs.getRecord("countries",28);
 		
-		System.out.println(dbs.getRecord("Orders", 2));
-		System.out.println(dbs.getRecord("Orders", 19));
-		System.out.println(dbs.getRecord("Orders", 14));
+		/*
+		 * 
+		 * MISS 0
+			HIT
+			HIT
+			HIT
+			HIT
+			MISS 2
+			MISS 3
+			MISS 1
+			HIT
+			MISS 0
+			MISS 2
+			MISS 1
+			MISS 3
+			MISS 0
+			MISS 2
+			MISS 3
+			MISS 0
+		 * 
+		 */
 		
 		dbs.flushPages();
 	}
