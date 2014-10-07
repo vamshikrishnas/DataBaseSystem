@@ -28,7 +28,7 @@ public class DBSystem {
 	private static int tableCount;
 	
 	public String pathTables;
-	
+	public String configFile;
 	
 	
 	private static ArrayList<String> tableNames = new ArrayList<String>();
@@ -86,6 +86,16 @@ public class DBSystem {
      }
 	
 	
+	
+	public boolean checkTable(String tablename)
+	{
+		
+		if(tableNames.contains(tablename))
+			return true;
+		else
+			return false;
+	}
+	
 	/* 
 	 * 
 	 * 
@@ -105,6 +115,7 @@ public class DBSystem {
 		{
 			
 			configFilePath=configFilePath+"config.txt";
+			configFile=configFilePath.toString();
 			Scanner configReader=new Scanner(new File(configFilePath));
 			configReader.useDelimiter("\n");
 			String params ;
